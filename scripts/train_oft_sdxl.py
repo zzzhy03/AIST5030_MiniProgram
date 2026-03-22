@@ -318,10 +318,18 @@ def parse_target_modules(value: str) -> list[str]:
 
 
 def create_oft_config(args: argparse.Namespace, target_modules: list[str]) -> OFTConfig:
-    if args.oft_rank is not None and args.oft_block_size is not None:
+    rank = args.oft_rank if args.oft_rank is not None else 0
+    block_size = args.oft_block_size if args.oft_block_size is not None else 0
+
+    if rank == 0 and block_size == 0:
+        rank = 8
+
+    if rank != 0 and block_size != 0:
         raise ValueError("Specify either --oft_rank or --oft_block_size, not both.")
 
     config_kwargs = {
+        "r": rank,
+        "oft_block_size": block_size,
         "module_dropout": args.oft_dropout,
         "target_modules": target_modules,
         "init_weights": True,
@@ -332,10 +340,6 @@ def create_oft_config(args: argparse.Namespace, target_modules: list[str]) -> OF
         "num_cayley_neumann_terms": args.num_cayley_neumann_terms,
         "bias": "none",
     }
-    if args.oft_rank is not None:
-        config_kwargs["r"] = args.oft_rank
-    if args.oft_block_size is not None:
-        config_kwargs["oft_block_size"] = args.oft_block_size
 
     return OFTConfig(**config_kwargs)
 
