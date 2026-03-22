@@ -5,6 +5,9 @@
 **Adaptation method:** Orthogonal Finetuning (OFT)  
 **Project repository:** [zzzhy03/AIST5030_MiniProgram](https://github.com/zzzhy03/AIST5030_MiniProgram)
 
+Student Name: ZHENG Hanyou
+Student Email: 1155254852@link.cuhk.edu.hk
+
 ## Abstract
 
 This project applies Orthogonal Finetuning (OFT) to Stable Diffusion XL for LEGO-style car generation. The goal is to adapt a strong pretrained text-to-image model to a narrow visual domain in which sports cars are rendered as toy-brick builds under a clean studio setup. The final model was trained on 36 curated images for 800 optimization steps at 1024 resolution on a single NVIDIA A800-SXM4-80GB GPU. The finetuned model improved style consistency, background cleanliness, and the reliability of the `skslego` trigger token in `txt2img`, while `img2img` showed weaker but still visible gains in toy-like geometric simplification. The main remaining limitations were imperfect color control, limited viewpoint diversity, and only moderate image-guided LEGO stylization.
