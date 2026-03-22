@@ -30,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--title", default="Training Loss", help="Plot title.")
     parser.add_argument("--step-column", default=None, help="Optional explicit column name for step.")
     parser.add_argument("--loss-column", default=None, help="Optional explicit column name for loss.")
+    parser.add_argument(
+        "--moving-average-window",
+        type=int,
+        default=25,
+        help="Optional moving-average window. Use 0 or 1 to disable smoothing.",
+    )
     return parser.parse_args()
 
 
@@ -70,11 +76,38 @@ def load_points(csv_path: Path, step_column: str | None, loss_column: str | None
     return steps, losses
 
 
-def plot_loss(steps: list[float], losses: list[float], title: str, output_path: Path) -> None:
+def moving_average(values: list[float], window: int) -> list[float]:
+    if window <= 1 or len(values) < window:
+        return values
+
+    rolling: list[float] = []
+    current = sum(values[:window])
+    rolling.append(current / window)
+    for index in range(window, len(values)):
+        current += values[index] - values[index - window]
+        rolling.append(current / window)
+    return rolling
+
+
+def plot_loss(
+    steps: list[float],
+    losses: list[float],
+    title: str,
+    output_path: Path,
+    moving_average_window: int,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(8, 4.5))
-    plt.plot(steps, losses, linewidth=2)
+    if moving_average_window > 1 and len(losses) >= moving_average_window:
+        smoothed_losses = moving_average(losses, moving_average_window)
+        smoothed_steps = steps[moving_average_window - 1 :]
+        plt.plot(steps, losses, linewidth=1, alpha=0.35, label="Raw Loss")
+        plt.plot(smoothed_steps, smoothed_losses, linewidth=2.5, label=f"Moving Average ({moving_average_window})")
+        plt.legend()
+    else:
+        plt.plot(steps, losses, linewidth=2, label="Loss")
+        plt.legend()
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.title(title)
@@ -86,7 +119,7 @@ def plot_loss(steps: list[float], losses: list[float], title: str, output_path: 
 def main() -> None:
     args = parse_args()
     steps, losses = load_points(args.input, args.step_column, args.loss_column)
-    plot_loss(steps, losses, args.title, args.output)
+    plot_loss(steps, losses, args.title, args.output, args.moving_average_window)
     print(f"Saved loss plot to {args.output}")
 
 

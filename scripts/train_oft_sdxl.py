@@ -430,6 +430,22 @@ def maybe_autocast(device: torch.device, mixed_precision: str):
     return torch.autocast(device_type="cuda", dtype=dtype)
 
 
+def resolve_weight_dtype(device: torch.device, mixed_precision: str) -> torch.dtype:
+    if device.type != "cuda" or mixed_precision == "no":
+        return torch.float32
+    if mixed_precision == "fp16":
+        return torch.float16
+    return torch.bfloat16
+
+
+def resolve_conditioning_dtype(args: argparse.Namespace, device: torch.device, weight_dtype: torch.dtype) -> torch.dtype:
+    if device.type != "cuda":
+        return torch.float32
+    if args.enable_xformers_memory_efficient_attention:
+        return torch.float32
+    return weight_dtype
+
+
 def run_validation(
     *,
     args: argparse.Namespace,
@@ -446,6 +462,7 @@ def run_validation(
     if not args.validation_prompt:
         return
 
+    train_weight_dtype = resolve_weight_dtype(device, args.mixed_precision)
     validation_dir = args.output_dir / "validation" / f"step-{step:06d}"
     validation_dir.mkdir(parents=True, exist_ok=True)
 
@@ -471,10 +488,10 @@ def run_validation(
         variant=args.variant,
         cache_dir=args.cache_dir,
         local_files_only=args.local_files_only,
-        torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+        torch_dtype=torch.float32,
     )
     pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config)
-    pipeline = pipeline.to(device)
+    pipeline = pipeline.to(device=device, dtype=torch.float32)
     pipeline.set_progress_bar_config(disable=True)
 
     pipeline_args = {
@@ -488,11 +505,10 @@ def run_validation(
         pipeline_args["strength"] = args.validation_strength
 
     with torch.no_grad():
-        with maybe_autocast(device, args.mixed_precision):
-            images = pipeline(
-                **pipeline_args,
-                num_images_per_prompt=args.num_validation_images,
-            ).images
+        images = pipeline(
+            **pipeline_args,
+            num_images_per_prompt=args.num_validation_images,
+        ).images
 
     for index, image in enumerate(images):
         image.save(validation_dir / f"sample_{index:02d}.png")
@@ -501,6 +517,17 @@ def run_validation(
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+    unet.to(device, dtype=train_weight_dtype)
+    vae.to(device, dtype=torch.float32)
+    if args.train_text_encoder:
+        text_encoder_one.to(device, dtype=torch.float32)
+        text_encoder_two.to(device, dtype=torch.float32)
+        cast_trainable_params([unet, text_encoder_one, text_encoder_two])
+    else:
+        text_encoder_one.to(device, dtype=train_weight_dtype)
+        text_encoder_two.to(device, dtype=train_weight_dtype)
+        cast_trainable_params([unet])
 
     if was_training["unet"]:
         unet.train()
@@ -526,12 +553,7 @@ def main() -> None:
         print("CUDA is not available. Falling back to full precision on CPU.")
         args.mixed_precision = "no"
 
-    if args.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif args.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-    else:
-        weight_dtype = torch.float32
+    weight_dtype = resolve_weight_dtype(device, args.mixed_precision)
 
     tokenizer_one = AutoTokenizer.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -615,7 +637,6 @@ def main() -> None:
     trainable_models = [unet]
     if args.train_text_encoder:
         trainable_models.extend([text_encoder_one, text_encoder_two])
-    cast_trainable_params(trainable_models)
 
     if args.enable_xformers_memory_efficient_attention:
         if not is_xformers_available():
@@ -636,6 +657,9 @@ def main() -> None:
     else:
         text_encoder_one.to(device, dtype=weight_dtype)
         text_encoder_two.to(device, dtype=weight_dtype)
+    cast_trainable_params(trainable_models)
+
+    conditioning_dtype = resolve_conditioning_dtype(args, device, weight_dtype)
 
     train_dataset = LocalImagePromptDataset(
         instance_data_dir=args.instance_data_dir,
@@ -699,7 +723,7 @@ def main() -> None:
         num_training_steps=max_train_steps,
     )
 
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda" and args.mixed_precision == "fp16")
+    scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda" and args.mixed_precision == "fp16")
 
     unique_prompts = {example.prompt for example in train_dataset.examples}
     cached_prompt_embeds = None
@@ -712,8 +736,8 @@ def main() -> None:
                 [tokenizer_one, tokenizer_two],
                 only_prompt,
             )
-        cached_prompt_embeds = cached_prompt_embeds.to(device=device, dtype=weight_dtype)
-        cached_pooled_prompt_embeds = cached_pooled_prompt_embeds.to(device=device, dtype=weight_dtype)
+        cached_prompt_embeds = cached_prompt_embeds.to(device=device, dtype=conditioning_dtype)
+        cached_pooled_prompt_embeds = cached_pooled_prompt_embeds.to(device=device, dtype=conditioning_dtype)
 
     trainable_params = count_trainable_params(trainable_models)
     summary = {
@@ -797,8 +821,8 @@ def main() -> None:
                     prompt=None,
                     text_input_ids_list=[tokens_one, tokens_two],
                 )
-                prompt_embeds = prompt_embeds.to(device=device, dtype=weight_dtype)
-                pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=weight_dtype)
+                prompt_embeds = prompt_embeds.to(device=device, dtype=conditioning_dtype)
+                pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=conditioning_dtype)
             else:
                 if cached_prompt_embeds is None:
                     with torch.no_grad():
@@ -807,8 +831,8 @@ def main() -> None:
                             [tokenizer_one, tokenizer_two],
                             batch["prompts"],
                         )
-                    prompt_embeds = prompt_embeds.to(device=device, dtype=weight_dtype)
-                    pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=weight_dtype)
+                    prompt_embeds = prompt_embeds.to(device=device, dtype=conditioning_dtype)
+                    pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=conditioning_dtype)
                 else:
                     batch_size = noisy_model_input.shape[0]
                     prompt_embeds = cached_prompt_embeds.repeat(batch_size, 1, 1)
@@ -819,7 +843,7 @@ def main() -> None:
                 batch["crop_top_lefts"],
                 resolution=args.resolution,
                 device=device,
-                dtype=weight_dtype,
+                dtype=conditioning_dtype,
             )
 
             target = (

@@ -83,7 +83,7 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch_dtype = torch.float16 if device.type == "cuda" else torch.float32
+    torch_dtype = torch.float32
 
     tokenizer_one = AutoTokenizer.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -158,7 +158,7 @@ def main() -> None:
         torch_dtype=torch_dtype,
     )
     pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config)
-    pipeline = pipeline.to(device)
+    pipeline = pipeline.to(device=device, dtype=torch_dtype)
     pipeline.set_progress_bar_config(disable=True)
 
     generator = None
@@ -180,8 +180,7 @@ def main() -> None:
         pipeline_args["width"] = args.width
 
     with torch.no_grad():
-        with torch.autocast("cuda", dtype=torch.float16) if device.type == "cuda" else torch.no_grad():
-            image = pipeline(**pipeline_args).images[0]
+        image = pipeline(**pipeline_args).images[0]
 
     image.save(args.output)
     print(json.dumps({"output": str(args.output)}, indent=2))
